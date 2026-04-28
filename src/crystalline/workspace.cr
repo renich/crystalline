@@ -159,7 +159,7 @@ class Crystalline::Workspace
         return cached_result unless cached_result.nil? && discard_nil_cached_result
       end
 
-      sync_channel = Channel(Crystal::Compiler::Result?).new
+      sync_channel = Channel(Crystal::Compiler::Result?).new(1)
 
       progress.report(server) do
         file_overrides = nil
@@ -172,16 +172,13 @@ class Crystalline::Workspace
           @opened_documents.each { |uri_str, text_document|
             contents = text_overrides.try(&.[uri_str]?) || text_document.contents
             contents = fix_source(contents)
-
-            if target_string == uri_str
-              # If the entry point itself needs to be loaded from memory.
-              sources = [
-                Crystal::Compiler::Source.new(target.decoded_path, contents),
-              ]
-            end
-            file_path = URI.parse(uri_str).decoded_path
-            file_overrides[file_path] = contents
+            file_overrides[URI.parse(uri_str).decoded_path] = contents
           }
+
+          if (doc = @opened_documents[target_string]?)
+            contents = text_overrides.try(&.[target_string]?) || doc.contents
+            sources = [Crystal::Compiler::Source.new(target.decoded_path, fix_source(contents))]
+          end
         end
 
         lib_path = project.try(&.default_lib_path)
@@ -361,11 +358,51 @@ class Crystalline::Workspace
     nil
   end
 
-  def completion(server : LSP::Server, file_uri : URI, position : LSP::Position, trigger_character : String?)
+  def completion(server : LSP::Server, file_uri : URI, position : LSP::Position, trigger_character : String?) : LSP::CompletionList?
     text_document = @opened_documents[file_uri.to_s]?
     return unless text_document
 
-    # LSP::Log.info { "completion: #{trigger_character}"}
+    # Check if we are inside a comment.
+    current_line = text_document.contents.lines(chomp: false)[position.line]?
+    if current_line
+      # Convert UTF-16 character position to byte offset for the lexer.
+      byte_offset = 0
+      char_offset = 0
+      current_line.each_char do |char|
+        # In UTF-16, characters > 0xFFFF take 2 code units (surrogate pair).
+        u16_size = char.ord > 0xFFFF ? 2 : 1
+        break if char_offset + u16_size > position.character
+
+        byte_offset += char.bytesize
+        char_offset += u16_size
+      end
+      # Lexer column numbers are 1-based byte offsets.
+      lexer_column = byte_offset + 1
+
+      lexer = Crystal::Lexer.new(current_line)
+      begin
+        loop do
+          token = lexer.next_token
+          break if token.type.eof?
+
+          if (loc = token.location)
+            break if loc.column_number > lexer_column
+          end
+
+          if token.type.comment?
+            if (loc = token.location)
+              token_start = loc.column_number
+              # If the cursor is at or after the start of the comment.
+              if lexer_column >= token_start
+                return nil
+              end
+            end
+          end
+        end
+      rescue Crystal::SyntaxException
+        # Ignore syntax errors while typing
+      end
+    end
 
     document_lines = fix_source(text_document.contents).lines(chomp: false)
     left_offset = 0
@@ -420,7 +457,6 @@ class Crystalline::Workspace
     result = self.compile(
       server,
       file_uri,
-      in_memory: true,
       discard_nil_cached_result: true,
       wants_doc: true,
       text_overrides: text_overrides,
