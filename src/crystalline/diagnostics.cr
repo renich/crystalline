@@ -25,7 +25,7 @@ class Crystalline::Diagnostics
     loop do
       error_stack << error if error.is_a? Crystal::ErrorFormat
       if error.responds_to? :inner
-        break unless (error = error.inner)
+        break unless error = error.inner
       else
         break
       end

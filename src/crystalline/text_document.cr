@@ -26,7 +26,7 @@ class Crystalline::TextDocument
   end
 
   def eof_position : LSP::Position
-    if (last_line = @inner_contents.last?)
+    if last_line = @inner_contents.last?
       if last_line.ends_with?("\n")
         LSP::Position.new(line: @inner_contents.size, character: 0)
       else

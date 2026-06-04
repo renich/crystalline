@@ -53,7 +53,7 @@ module Crystalline
     server = LSP::Server.new(input, output, SERVER_CAPABILITIES)
 
     # Re-setup with the LSP backend once the server is initialized.
-    if (backend = LSP::Log.backend)
+    if backend = LSP::Log.backend
       ::Log.setup(log_level, backend)
     end
 

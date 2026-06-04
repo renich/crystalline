@@ -99,7 +99,7 @@ module Crystalline::Analysis
     end
 
     def visit(node : Crystal::Call)
-      if (expanded = node.expanded)
+      if expanded = node.expanded
         @parent_macro_call = node
         expanded.accept(self)
         @parent_macro_call = nil
