@@ -1,4 +1,5 @@
 require "./crystalline/requires"
+require "./crystalline/ext/fix_random_warning"
 require "./crystalline/*"
 require "option_parser"
 
