@@ -2,50 +2,14 @@
 	<img src="assets/icon.svg" width="128" height="128" />
 	<h1>crystalline</h1>
   <h3>A Language Server for Crystal.</h3>
-  <a href="https://github.com/elbywan/crystalline/actions?query=branch%3Amaster+workflow%3ABuild"><img alt="Build Status" src="https://github.com/elbywan/crystalline/workflows/Build/badge.svg?branch=master"></a>
-  <a href="https://github.com/elbywan/crystalline/tags"><img alt="GitHub tag (latest SemVer)" src="https://img.shields.io/github/v/tag/elbywan/crystalline"></a>
-  <a href="https://github.com/elbywan/crystalline/blob/master/LICENSE"><img alt="GitHub" src="https://img.shields.io/github/license/elbywan/crystalline"></a>
+  <a href="https://github.com/renich/crystalline/actions?query=branch%3Amaster+workflow%3ABuild"><img alt="Build Status" src="https://github.com/renich/crystalline/workflows/Build/badge.svg?branch=master"></a>
+  <a href="https://github.com/renich/crystalline/tags"><img alt="GitHub tag (latest SemVer)" src="https://img.shields.io/github/v/tag/renich/crystalline"></a>
+  <a href="https://github.com/renich/crystalline/blob/master/LICENSE"><img alt="GitHub" src="https://img.shields.io/github/license/renich/crystalline"></a>
 </div>
 
 <hr/>
 
-**`Crystalline` is an implementation of the
-[Language Server Protocol](https://microsoft.github.io/language-server-protocol/)
-written in and for the [Crystal Language](https://crystal-lang.org/). It aims to
-provide limited language features (like go-to, autocompletion, syntax and
-semantic checking) and ease development with any compatible code editor.**
-
-> [!IMPORTANT]
->
-> ### Project Status
->
-> I am **passively** maintaining this project which means that I will not be
-> regularly adding new features or fixing bugs. My time is **very** limited and I have
-> other projects that I want to work on.
->
-> Crystalline begun as a fun experiment because at the time there was no working LSP for
-> Crystal, and was written mainly to cater to my own needs - on my free time. I was happy to
-> open-source it and share it with the community because I thought it could be
-> useful to others.
->
-> But over time, some vocal people in the Crystal community have been openly
-> trash-talking the project in the (un)official discord channel, telling users
-> to avoid using it and spreading misinformation, which I am not cool with.
->
-> Crystalline has a bunch of issues, but if you know what you are doing, it can be a very
-> useful tool. I know that because I am the primary user of it.
->
-> Due to the nature of the Crystal language and the way the compiler works, it
-> is not possible to provide a full-fledged language server with all the
-> features that one would expect. If you have a problem
-> with that, then I suggest you use another language - or wait for someone else
-> to write a better LSP (which I would be happy to see, but doubt will happen).
->
-> I am not paid to work on this project, I do it for fun.
->
-> **And unfortunately, the fun has been sucked out of it.**
-
-<hr/>
+**`Crystalline` is a fork of the original implementation of the [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) written in and for the [Crystal Language](https://crystal-lang.org/). It aims to provide language features (like go-to, autocompletion, syntax and semantic checking) and ease development with any compatible code editor.**
 
 <div align="center">
 <img src="assets/small_demo.gif" height="300" width="360"/>
@@ -87,7 +51,7 @@ Building from source does take a long time._
 ##### Linux (x86_64)
 
 ```sh
-wget https://github.com/elbywan/crystalline/releases/latest/download/crystalline_x86_64-unknown-linux-musl.gz -O crystalline.gz &&\
+wget https://github.com/renich/crystalline/releases/latest/download/crystalline_x86_64-unknown-linux-musl.gz -O crystalline.gz &&\
 gzip -d crystalline.gz &&\
 chmod u+x crystalline
 ```
@@ -108,12 +72,12 @@ brew install crystalline
 
 #### Specific release
 
-[See the releases page.](https://github.com/elbywan/crystalline/releases)
+[See the releases page.](https://github.com/renich/crystalline/releases)
 
 #### Specific commit
 
 [Binaries are uploaded as artifacts during the CI
-build.](https://github.com/elbywan/crystalline/actions)
+build.](https://github.com/renich/crystalline/actions)
 
 ### Build from source
 
@@ -127,7 +91,7 @@ In the `.shard.yml` file:
 ```yml
 development_dependencies:
   crystalline:
-    github: elbywan/crystalline
+    github: renich/crystalline
     branch: master
 ```
 
@@ -141,7 +105,7 @@ shards build crystalline --release --no-debug --progress -Dpreview_mt
 #### Global install
 
 ```sh
-git clone https://github.com/elbywan/crystalline
+git clone https://github.com/renich/crystalline
 cd crystalline
 shards install
 mkdir bin
@@ -436,7 +400,7 @@ Debug logs are deactivated by default, uncomment this line in
 
 ## Contributing
 
-1. Fork it (<https://github.com/elbywan/crystalline/fork>)
+1. Fork it (<https://github.com/renich/crystalline/fork>)
 2. Create your feature branch (`git checkout -b my-new-feature`)
 3. Commit your changes (`git commit -am 'Add some feature'`)
 4. Push to the branch (`git push origin my-new-feature`)
@@ -444,7 +408,7 @@ Debug logs are deactivated by default, uncomment this line in
 
 **Please always `crystal tool format` your code!**
 
-## [Contributors](https://github.com/elbywan/crystalline/graphs/contributors)
+## [Contributors](https://github.com/renich/crystalline/graphs/contributors)
 
 ## Credit
 
