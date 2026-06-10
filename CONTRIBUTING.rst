@@ -15,27 +15,86 @@ Getting Started
 
       git checkout -b feature/my-cool-feature
 
+Environment Setup
+=================
+
+Crystalline requires LLVM to be installed and available on your system in order to run semantic analysis and build.
+
+On some systems, the compiler may need help finding the ``llvm-config`` binary. You can set the ``LLVM_CONFIG`` environment variable:
+
+.. code-block:: bash
+
+   export LLVM_CONFIG="$(brew --prefix llvm)/bin/llvm-config" # MacOS (Homebrew)
+   # Or on Fedora/RHEL:
+   export LLVM_CONFIG="/usr/bin/llvm-config"
+
+To install development dependencies:
+
+.. code-block:: bash
+
+   shards install
+
+Codebase Architecture
+=====================
+
+A brief map of the repository's files to help you navigate:
+
+* **src/crystalline.cr**: The CLI entry point where options (using ``OptionParser``) are parsed.
+* **src/crystalline/main.cr**: Initializes and boots the LSP server.
+* **src/crystalline/controller.cr**: Handles incoming LSP requests and routes them to workspace actions.
+* **src/crystalline/workspace.cr**: Manages document collections, compiler sessions, and code diagnostics.
+* **src/crystalline/ext/**: Contains overrides, monkeypatches, and Boehm GC tuning for compiler integration.
+* **spec/**: Contains integration and unit specs for the Language Server.
+
 Development Workflow
 ====================
 
-#. Install development dependencies:
+To speed up development, you can use `Sentry <https://github.com/samueleaton/sentry>`_ to rebuild the server automatically on file changes:
 
-   .. code-block:: bash
+.. code-block:: bash
 
-      shards install
+   # Build Sentry once
+   shards build --release sentry
+   # Run Sentry to watch the filesystem and auto-compile crystalline in debug mode
+   ./bin/sentry -i
 
-#. Make your changes.
-#. Format the code. Always run the formatter before committing:
+To build the project manually:
 
-   .. code-block:: bash
+.. code-block:: bash
 
-      crystal tool format
+   shards build crystalline          # Debug build
+   shards build crystalline --release # Production/Release build
 
-#. Run tests to ensure everything is functioning correctly:
+Formatting & Linting
+====================
 
-   .. code-block:: bash
+Always run the formatter and linter before committing your changes:
 
-      crystal spec
+.. code-block:: bash
+
+   crystal tool format
+   ./bin/ameba
+
+Debugging & Testing
+===================
+
+To run the test suite:
+
+.. code-block:: bash
+
+   crystal spec
+
+Since LSP servers communicate over stdin/stdout, standard ``puts`` statements can break the JSON-RPC protocol. Instead, use the built-in LSP logger to print diagnostic information:
+
+.. code-block:: crystal
+
+   LSP::Log.info { "Debugging value: #{my_var}" }
+
+You can enable verbose debug logging by launching crystalline with the log level flag:
+
+.. code-block:: bash
+
+   ./bin/crystalline -l debug
 
 Commit Guidelines
 =================
