@@ -30,6 +30,10 @@ OptionParser.parse do |parser|
                 end
   end
 
+  parser.on("--stdio", "Use standard I/O (default)") do
+    # No-op: standard I/O is the only transport supported by crystalline
+  end
+
   parser.invalid_option do |flag|
     STDERR.puts "ERROR: #{flag} is not a valid option."
     STDERR.puts parser
