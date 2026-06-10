@@ -42,10 +42,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
       - name: Build the static binary
-        run: docker build -t crystalline .
+        run: podman build -t crystalline -f Containerfile .
       - name: Copy binary to host
         run: |
-          docker run -v $PWD:/app/host --rm crystalline:latest cp ./bin/crystalline ./host/crystalline
+          podman run -v $PWD:/app/host:z --rm crystalline:latest cp ./bin/crystalline ./host/crystalline
       - name: Upload a Build Artifact
         uses: actions/upload-artifact@v7.0.1
         with:

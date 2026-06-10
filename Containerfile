@@ -1,4 +1,4 @@
-FROM crystallang/crystal:1.20.2-alpine
+FROM docker.io/crystallang/crystal:1.20.2-alpine
 
 WORKDIR /app
 
