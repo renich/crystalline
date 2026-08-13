@@ -1,0 +1,711 @@
+require "spec"
+require "../../src/crystalline/requires"
+require "../../src/crystalline/main"
+require "../../src/crystalline/lightweight/hover"
+
+private def build_lightweight_hover_query(source : String)
+  path = File.join(Dir.tempdir, "crystalline-lightweight-hover-#{Random::Secure.hex(8)}.cr")
+  File.write(path, source)
+
+  begin
+    Crystalline::EnvironmentConfig.run
+    server = LSP::Server.new(IO::Memory.new, IO::Memory.new)
+    result = Crystalline::Analysis.compile(
+      server,
+      URI.parse("file://#{path}"),
+      lib_path: File.join(Dir.current, "lib"),
+      top_level: true,
+      ignore_diagnostics: true,
+    )
+    raise "expected top-level semantic result" unless result
+    Crystalline::Lightweight::Query.new(Crystalline::Lightweight::Index.from_program(result.program), secondary: prelude_index)
+  ensure
+    File.delete(path) if File.exists?(path)
+  end
+end
+
+private def hover_value(hover : LSP::Hover)
+  hover.contents.as(LSP::MarkupContent).value
+end
+
+private def build_syntax_hover_query(source : String)
+  index = Crystalline::Lightweight::Index.from_source(source)
+  raise "expected syntax index" unless index
+  Crystalline::Lightweight::Query.new(index)
+end
+
+private def prelude_index : Crystalline::Lightweight::Index
+  Crystalline::Lightweight::PreludeIndex.ensure_loaded
+  until (index = Crystalline::Lightweight::PreludeIndex.get)
+    sleep 50.milliseconds
+  end
+  index
+end
+
+describe Crystalline::Lightweight::Hover do
+  it "hovers inferred local variable types" do
+    source = <<-CRYSTAL
+      class Greeter
+      end
+
+      def demo
+        greeter = Greeter.new
+        greeter
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.strip == "greeter" }
+    column_number = lines[line_number].index("greeter").not_nil! + 2
+
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    hover_value(hover.not_nil!).should contain("greeter : Greeter")
+  end
+
+  it "hovers instance methods from inferred local receivers" do
+    source = <<-CRYSTAL
+      class Greeter
+        def greet(name : String) : String
+          name
+        end
+      end
+
+      def demo
+        greeter = Greeter.new
+        greeter.greet
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.strip == "greeter.greet" }
+    column_number = lines[line_number].rindex("greet").not_nil! + 2
+
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    hover_value(hover.not_nil!).should contain("Greeter#greet(name : String) : String")
+  end
+
+  it "hovers class methods from constant receivers" do
+    source = <<-CRYSTAL
+      class Greeter
+        def self.build(name : String) : Greeter
+          new
+        end
+      end
+
+      def demo
+        Greeter.build
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.strip == "Greeter.build" }
+    column_number = lines[line_number].rindex("build").not_nil! + 2
+
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    hover_value(hover.not_nil!).should contain("Greeter.build(name : String) : Greeter")
+  end
+
+  it "hovers type names from the lightweight index" do
+    source = <<-CRYSTAL
+      # Greeter docs
+      class Greeter
+      end
+
+      def demo
+        Greeter
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.strip == "Greeter" }
+    column_number = lines[line_number].index("Greeter").not_nil! + 2
+
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    value = hover_value(hover.not_nil!)
+    value.should contain("Greeter")
+  end
+
+  it "hovers chained receiver methods using explicit return types" do
+    source = <<-CRYSTAL
+      class Greeter
+        def shout : String
+          "!"
+        end
+      end
+
+      class Factory
+        def build : Greeter
+          Greeter.new
+        end
+      end
+
+      def demo
+        factory = Factory.new
+        factory.build.shout
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.strip == "factory.build.shout" }
+    column_number = lines[line_number].rindex("shout").not_nil! + 2
+
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    hover_value(hover.not_nil!).should contain("Greeter#shout() : String")
+  end
+
+  it "hovers self and instance variables from lightweight inference" do
+    source = <<-CRYSTAL
+      class Greeter
+        def shout : String
+          "!"
+        end
+      end
+
+      class Wrapper
+        def initialize
+          @greeter = Greeter.new
+        end
+
+        def hello : String
+          "hi"
+        end
+
+        def demo
+          self
+          @greeter
+          self.hello
+          @greeter.shout
+        end
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+
+    self_line_number = lines.index! { |item| item.strip == "self" }
+    self_column_number = lines[self_line_number].index("self").not_nil! + 1
+    self_hover = Crystalline::Lightweight::Hover.hover(source, self_line_number, self_column_number, query)
+    self_hover.should_not be_nil
+    hover_value(self_hover.not_nil!).should contain("self : Wrapper")
+
+    ivar_line_number = lines.index! { |item| item.strip == "@greeter" }
+    ivar_column_number = lines[ivar_line_number].index("@greeter").not_nil! + 2
+    ivar_hover = Crystalline::Lightweight::Hover.hover(source, ivar_line_number, ivar_column_number, query)
+    ivar_hover.should_not be_nil
+    hover_value(ivar_hover.not_nil!).should contain("@greeter : Greeter")
+
+    self_method_line_number = lines.index! { |item| item.strip == "self.hello" }
+    self_method_column_number = lines[self_method_line_number].rindex("hello").not_nil! + 2
+    self_method_hover = Crystalline::Lightweight::Hover.hover(source, self_method_line_number, self_method_column_number, query)
+    self_method_hover.should_not be_nil
+    hover_value(self_method_hover.not_nil!).should contain("Wrapper#hello() : String")
+
+    ivar_method_line_number = lines.index! { |item| item.strip == "@greeter.shout" }
+    ivar_method_column_number = lines[ivar_method_line_number].rindex("shout").not_nil! + 2
+    ivar_method_hover = Crystalline::Lightweight::Hover.hover(source, ivar_method_line_number, ivar_method_column_number, query)
+    ivar_method_hover.should_not be_nil
+    hover_value(ivar_method_hover.not_nil!).should contain("Greeter#shout() : String")
+  end
+
+  it "hovers helper and container receiver methods" do
+    source = <<-CRYSTAL
+      class Greeter
+        def shout : String
+          "!"
+        end
+      end
+
+      def demo(candidate : Greeter | Nil)
+        items = [Greeter.new]
+        items.first.shout
+        candidate.not_nil!.shout
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+
+    first_line_number = lines.index! { |item| item.strip == "items.first.shout" }
+    first_column_number = lines[first_line_number].rindex("shout").not_nil! + 2
+    first_hover = Crystalline::Lightweight::Hover.hover(source, first_line_number, first_column_number, query)
+    first_hover.should_not be_nil
+    hover_value(first_hover.not_nil!).should contain("Greeter#shout() : String")
+
+    not_nil_line_number = lines.index! { |item| item.strip == "candidate.not_nil!.shout" }
+    not_nil_column_number = lines[not_nil_line_number].rindex("shout").not_nil! + 2
+    not_nil_hover = Crystalline::Lightweight::Hover.hover(source, not_nil_line_number, not_nil_column_number, query)
+    not_nil_hover.should_not be_nil
+    hover_value(not_nil_hover.not_nil!).should contain("Greeter#shout() : String")
+  end
+
+  it "hovers methods in standalone syntax-only files" do
+    source = <<-CRYSTAL
+      class Clazz
+        def method1(num : Int32)
+          2
+        end
+      end
+
+      puts Clazz.new.method1(num: 42)
+    CRYSTAL
+
+    query = build_syntax_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.includes?("Clazz.new.method1") }
+    column_number = lines[line_number].rindex("method1").not_nil! + 2
+
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    hover_value(hover.not_nil!).should contain("Clazz#method1(num : Int32)")
+  end
+
+  it "hovers block arguments inferred from helpers" do
+    source = <<-CRYSTAL
+      class Greeter
+        def shout : String
+          "!"
+        end
+      end
+
+      def demo
+        items = [Greeter.new]
+        items.each_with_index do |item, index|
+          item
+          index
+        end
+
+        Greeter.new.tap do |value|
+          value
+        end
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+
+    item_line_number = lines.index! { |item| item.strip == "item" }
+    item_column_number = lines[item_line_number].index("item").not_nil! + 1
+    item_hover = Crystalline::Lightweight::Hover.hover(source, item_line_number, item_column_number, query)
+    item_hover.should_not be_nil
+    hover_value(item_hover.not_nil!).should contain("item : Greeter")
+
+    index_line_number = lines.index! { |item| item.strip == "index" }
+    index_column_number = lines[index_line_number].index("index").not_nil! + 1
+    index_hover = Crystalline::Lightweight::Hover.hover(source, index_line_number, index_column_number, query)
+    index_hover.should_not be_nil
+    hover_value(index_hover.not_nil!).should contain("index : Int32")
+
+    value_line_number = lines.index! { |item| item.strip == "value" }
+    value_column_number = lines[value_line_number].index("value").not_nil! + 1
+    value_hover = Crystalline::Lightweight::Hover.hover(source, value_line_number, value_column_number, query)
+    value_hover.should_not be_nil
+    hover_value(value_hover.not_nil!).should contain("value : Greeter")
+  end
+
+  it "hovers tuple and named tuple derived receivers" do
+    source = <<-CRYSTAL
+      class Greeter
+        def shout : String
+          "!"
+        end
+      end
+
+      def demo
+        pair = {Greeter.new, 1}
+        pair.first.shout
+
+        tuple_pair = {1, "x"}
+        tuple_pair.map
+
+        named = {greeter: Greeter.new}
+        named.greeter.shout
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+
+    tuple_line_number = lines.index! { |item| item.strip == "pair.first.shout" }
+    tuple_column_number = lines[tuple_line_number].rindex("shout").not_nil! + 2
+    tuple_hover = Crystalline::Lightweight::Hover.hover(source, tuple_line_number, tuple_column_number, query)
+    tuple_hover.should_not be_nil
+    hover_value(tuple_hover.not_nil!).should contain("Greeter#shout() : String")
+
+    tuple_map_line_number = lines.index! { |item| item.strip == "tuple_pair.map" }
+    tuple_map_column_number = lines[tuple_map_line_number].rindex("map").not_nil! + 2
+    tuple_map_hover = Crystalline::Lightweight::Hover.hover(source, tuple_map_line_number, tuple_map_column_number, query)
+    tuple_map_hover.should_not be_nil
+    hover_value(tuple_map_hover.not_nil!).should contain("Tuple(Int32, String)#map()")
+
+    named_line_number = lines.index! { |item| item.strip == "named.greeter.shout" }
+    named_column_number = lines[named_line_number].rindex("shout").not_nil! + 2
+    named_hover = Crystalline::Lightweight::Hover.hover(source, named_line_number, named_column_number, query)
+    named_hover.should_not be_nil
+    hover_value(named_hover.not_nil!).should contain("Greeter#shout() : String")
+  end
+
+  it "hovers helper chains that preserve collection receiver shapes" do
+    source = <<-CRYSTAL
+      class Greeter
+        def shout : String
+          "!"
+        end
+      end
+
+      def demo(items : Array(Greeter), candidate : Greeter | Nil)
+        items.select.first?.not_nil!.shout
+        items.find.not_nil!.shout
+        candidate.try &.shout
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+
+    select_line_number = lines.index! { |item| item.strip == "items.select.first?.not_nil!.shout" }
+    select_column_number = lines[select_line_number].rindex("shout").not_nil! + 2
+    select_hover = Crystalline::Lightweight::Hover.hover(source, select_line_number, select_column_number, query)
+    select_hover.should_not be_nil
+    hover_value(select_hover.not_nil!).should contain("Greeter#shout() : String")
+
+    find_line_number = lines.index! { |item| item.strip == "items.find.not_nil!.shout" }
+    find_column_number = lines[find_line_number].rindex("shout").not_nil! + 2
+    find_hover = Crystalline::Lightweight::Hover.hover(source, find_line_number, find_column_number, query)
+    find_hover.should_not be_nil
+    hover_value(find_hover.not_nil!).should contain("Greeter#shout() : String")
+
+    try_line_number = lines.index! { |item| item.strip == "candidate.try &.shout" }
+    try_column_number = lines[try_line_number].rindex("shout").not_nil! + 2
+    try_hover = Crystalline::Lightweight::Hover.hover(source, try_line_number, try_column_number, query)
+    try_hover.should_not be_nil
+    hover_value(try_hover.not_nil!).should contain("Greeter#shout() : String")
+  end
+
+  it "hovers richer hash and reducer helper flows" do
+    source = <<-CRYSTAL
+      class Greeter
+        def shout : String
+          "!"
+        end
+
+        def word : String | Nil
+          "hi"
+        end
+      end
+
+      def demo
+        lookup = {"primary" => Greeter.new}
+        lookup.each do |key, value|
+          key
+          value
+        end
+
+        numbers = [1, 2]
+        numbers.reduce do |memo, item|
+          memo
+          item
+        end
+
+        collected = lookup.values.each_with_object([] of String) do |collected_item, collected_memo|
+          collected_item
+          collected_memo
+        end
+        collected.first.upcase
+
+        mapped = lookup.values.map { |item| item.word.not_nil! }
+        mapped.first.upcase
+
+        flat_mapped = lookup.values.flat_map { |item| [item.word.not_nil!] }
+        flat_mapped.first.upcase
+
+        compacted = lookup.values.compact_map { |item| item.word }
+        compacted.first.upcase
+
+        indexed = lookup.values.index_by { |item| item.word.not_nil! }
+        indexed["primary"].shout
+
+        grouped = lookup.values.group_by { |item| item.word.not_nil! }
+        grouped["primary"].first.shout
+
+        found_value = lookup.values.find_value { |item| item.word }
+        found_value.not_nil!.upcase
+
+        resolved = lookup.values.first?.try { |item| item.word.not_nil! }
+        resolved.not_nil!.upcase
+
+        lookup.dig.shout
+
+        items = [Greeter.new]
+        items.find!.shout
+        items.compact_map
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+
+    key_line_number = lines.index! { |item| item.strip == "key" }
+    key_column_number = lines[key_line_number].index("key").not_nil! + 1
+    key_hover = Crystalline::Lightweight::Hover.hover(source, key_line_number, key_column_number, query)
+    key_hover.should_not be_nil
+    hover_value(key_hover.not_nil!).should contain("key : String")
+
+    value_line_number = lines.index! { |item| item.strip == "value" }
+    value_column_number = lines[value_line_number].index("value").not_nil! + 1
+    value_hover = Crystalline::Lightweight::Hover.hover(source, value_line_number, value_column_number, query)
+    value_hover.should_not be_nil
+    hover_value(value_hover.not_nil!).should contain("value : Greeter")
+
+    memo_line_number = lines.index! { |item| item.strip == "memo" }
+    memo_column_number = lines[memo_line_number].index("memo").not_nil! + 1
+    memo_hover = Crystalline::Lightweight::Hover.hover(source, memo_line_number, memo_column_number, query)
+    memo_hover.should_not be_nil
+    hover_value(memo_hover.not_nil!).should contain("memo : Int32")
+
+    item_line_number = lines.index! { |item| item.strip == "item" }
+    item_column_number = lines[item_line_number].index("item").not_nil! + 1
+    item_hover = Crystalline::Lightweight::Hover.hover(source, item_line_number, item_column_number, query)
+    item_hover.should_not be_nil
+    hover_value(item_hover.not_nil!).should contain("item : Int32")
+
+    each_with_object_item_line_number = lines.index! { |item| item.strip == "collected_item" }
+    each_with_object_item_column_number = lines[each_with_object_item_line_number].index("collected_item").not_nil! + 1
+    each_with_object_item_hover = Crystalline::Lightweight::Hover.hover(source, each_with_object_item_line_number, each_with_object_item_column_number, query)
+    each_with_object_item_hover.should_not be_nil
+    hover_value(each_with_object_item_hover.not_nil!).should contain("collected_item : Greeter")
+
+    each_with_object_memo_line_number = lines.index! { |item| item.strip == "collected_memo" }
+    each_with_object_memo_column_number = lines[each_with_object_memo_line_number].index("collected_memo").not_nil! + 1
+    each_with_object_memo_hover = Crystalline::Lightweight::Hover.hover(source, each_with_object_memo_line_number, each_with_object_memo_column_number, query)
+    each_with_object_memo_hover.should_not be_nil
+    hover_value(each_with_object_memo_hover.not_nil!).should contain("collected_memo : Array(String)")
+
+    collected_line_number = lines.index! { |item| item.strip == "collected.first.upcase" }
+    collected_column_number = lines[collected_line_number].rindex("upcase").not_nil! + 2
+    collected_hover = Crystalline::Lightweight::Hover.hover(source, collected_line_number, collected_column_number, query)
+    collected_hover.should_not be_nil
+    hover_value(collected_hover.not_nil!).should contain("String#upcase(")
+
+    mapped_line_number = lines.index! { |item| item.strip == "mapped.first.upcase" }
+    mapped_column_number = lines[mapped_line_number].rindex("upcase").not_nil! + 2
+    mapped_hover = Crystalline::Lightweight::Hover.hover(source, mapped_line_number, mapped_column_number, query)
+    mapped_hover.should_not be_nil
+    hover_value(mapped_hover.not_nil!).should contain("String#upcase(")
+
+    flat_mapped_line_number = lines.index! { |item| item.strip == "flat_mapped.first.upcase" }
+    flat_mapped_column_number = lines[flat_mapped_line_number].rindex("upcase").not_nil! + 2
+    flat_mapped_hover = Crystalline::Lightweight::Hover.hover(source, flat_mapped_line_number, flat_mapped_column_number, query)
+    flat_mapped_hover.should_not be_nil
+    hover_value(flat_mapped_hover.not_nil!).should contain("String#upcase(")
+
+    compacted_line_number = lines.index! { |item| item.strip == "compacted.first.upcase" }
+    compacted_column_number = lines[compacted_line_number].rindex("upcase").not_nil! + 2
+    compacted_hover = Crystalline::Lightweight::Hover.hover(source, compacted_line_number, compacted_column_number, query)
+    compacted_hover.should_not be_nil
+    hover_value(compacted_hover.not_nil!).should contain("String#upcase(")
+
+    indexed_line_number = lines.index! { |item| item.strip == "indexed[\"primary\"].shout" }
+    indexed_column_number = lines[indexed_line_number].rindex("shout").not_nil! + 2
+    indexed_hover = Crystalline::Lightweight::Hover.hover(source, indexed_line_number, indexed_column_number, query)
+    indexed_hover.should_not be_nil
+    hover_value(indexed_hover.not_nil!).should contain("Greeter#shout() : String")
+
+    grouped_line_number = lines.index! { |item| item.strip == "grouped[\"primary\"].first.shout" }
+    grouped_column_number = lines[grouped_line_number].rindex("shout").not_nil! + 2
+    grouped_hover = Crystalline::Lightweight::Hover.hover(source, grouped_line_number, grouped_column_number, query)
+    grouped_hover.should_not be_nil
+    hover_value(grouped_hover.not_nil!).should contain("Greeter#shout() : String")
+
+    found_value_line_number = lines.index! { |item| item.strip == "found_value.not_nil!.upcase" }
+    found_value_column_number = lines[found_value_line_number].rindex("upcase").not_nil! + 2
+    found_value_hover = Crystalline::Lightweight::Hover.hover(source, found_value_line_number, found_value_column_number, query)
+    found_value_hover.should_not be_nil
+    hover_value(found_value_hover.not_nil!).should contain("String#upcase(")
+
+    resolved_line_number = lines.index! { |item| item.strip == "resolved.not_nil!.upcase" }
+    resolved_column_number = lines[resolved_line_number].rindex("upcase").not_nil! + 2
+    resolved_hover = Crystalline::Lightweight::Hover.hover(source, resolved_line_number, resolved_column_number, query)
+    resolved_hover.should_not be_nil
+    hover_value(resolved_hover.not_nil!).should contain("String#upcase(")
+
+    dig_line_number = lines.index! { |item| item.strip == "lookup.dig.shout" }
+    dig_column_number = lines[dig_line_number].rindex("shout").not_nil! + 2
+    dig_hover = Crystalline::Lightweight::Hover.hover(source, dig_line_number, dig_column_number, query)
+    dig_hover.should_not be_nil
+    hover_value(dig_hover.not_nil!).should contain("Greeter#shout() : String")
+
+    find_bang_line_number = lines.index! { |item| item.strip == "items.find!.shout" }
+    find_bang_column_number = lines[find_bang_line_number].rindex("shout").not_nil! + 2
+    find_bang_hover = Crystalline::Lightweight::Hover.hover(source, find_bang_line_number, find_bang_column_number, query)
+    find_bang_hover.should_not be_nil
+    hover_value(find_bang_hover.not_nil!).should contain("Greeter#shout() : String")
+
+    inherited_line_number = lines.index! { |item| item.strip == "items.compact_map" }
+    inherited_column_number = lines[inherited_line_number].rindex("compact_map").not_nil! + 2
+    inherited_hover = Crystalline::Lightweight::Hover.hover(source, inherited_line_number, inherited_column_number, query)
+    inherited_hover.should_not be_nil
+    hover_value(inherited_hover.not_nil!).should contain("compact_map")
+  end
+
+  it "hovers methods on receivers from calls with arguments" do
+    source = <<-CRYSTAL
+      class Greeter
+        def shout : String
+          "!"
+        end
+      end
+
+      class Factory
+        def build(name : String) : Greeter
+          Greeter.new
+        end
+      end
+
+      def demo(factory : Factory)
+        Greeter.new("hi").shout
+        factory.build("hi").shout
+      end
+    CRYSTAL
+
+    query = build_syntax_hover_query(source)
+    lines = source.lines(chomp: false)
+
+    new_line_number = lines.index! { |item| item.strip == "Greeter.new(\"hi\").shout" }
+    new_column_number = lines[new_line_number].rindex("shout").not_nil! + 2
+    new_hover = Crystalline::Lightweight::Hover.hover(source, new_line_number, new_column_number, query)
+    new_hover.should_not be_nil
+    hover_value(new_hover.not_nil!).should contain("Greeter#shout() : String")
+
+    build_line_number = lines.index! { |item| item.strip == "factory.build(\"hi\").shout" }
+    build_column_number = lines[build_line_number].rindex("shout").not_nil! + 2
+    build_hover = Crystalline::Lightweight::Hover.hover(source, build_line_number, build_column_number, query)
+    build_hover.should_not be_nil
+    hover_value(build_hover.not_nil!).should contain("Greeter#shout() : String")
+  end
+
+  it "hovers namespace-relative type names" do
+    source = <<-CRYSTAL
+      module Outer
+        class Inner
+        end
+
+        def demo
+          Inner.new
+        end
+      end
+    CRYSTAL
+
+    query = build_syntax_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.strip == "Inner.new" }
+    column_number = lines[line_number].index("Inner").not_nil! + 2
+
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    hover_value(hover.not_nil!).should contain("Outer::Inner")
+  end
+
+  it "does not resolve tokens inside comments" do
+    source = <<-CRYSTAL
+      def demo
+        # requests that are pending
+        x = 1
+      end
+    CRYSTAL
+
+    query = build_syntax_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.includes?("requests") }
+    column_number = lines[line_number].index("requests").not_nil! + 2
+
+    Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query).should be_nil
+  end
+
+  it "does not resolve tokens inside string literals" do
+    source = <<-CRYSTAL
+      require "./workspace"
+
+      def demo
+        x = 1
+      end
+    CRYSTAL
+
+    query = build_syntax_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.includes?("workspace") }
+    column_number = lines[line_number].index("workspace").not_nil! + 2
+
+    Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query).should be_nil
+  end
+
+  it "hovers a bare getter self-call" do
+    source = <<-CRYSTAL
+      class Clazz
+        getter! workspace : Clazz
+
+        def demo
+          workspace
+        end
+      end
+    CRYSTAL
+
+    query = build_syntax_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.strip == "workspace" }
+    column_number = lines[line_number].index("workspace").not_nil! + 2
+
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    hover_value(hover.not_nil!).should contain("workspace")
+  end
+
+  it "hovers a method whose receiver sits inside an unclosed paren group" do
+    source = <<-CRYSTAL
+      class Project
+        def entry_point? : String
+          "x"
+        end
+      end
+
+      def demo(project : Project)
+        return unless (target = project.entry_point?)
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.includes?("entry_point?") }
+    column_number = lines[line_number].index("entry_point?").not_nil! + 1
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    hover_value(hover.not_nil!).should contain("entry_point?")
+  end
+
+  it "hovers compiler-intrinsic predicates like nil? even when the receiver is untyped" do
+    source = <<-CRYSTAL
+      def demo(path : String)
+        if path.nil?
+          ""
+        end
+      end
+    CRYSTAL
+
+    query = build_lightweight_hover_query(source)
+    lines = source.lines(chomp: false)
+    line_number = lines.index! { |item| item.includes?("path.nil?") }
+    column_number = lines[line_number].index("nil?").not_nil! + 1
+    hover = Crystalline::Lightweight::Hover.hover(source, line_number, column_number, query)
+    hover.should_not be_nil
+    hover_value(hover.not_nil!).should contain("nil? : Bool")
+  end
+end
