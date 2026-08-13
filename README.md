@@ -60,7 +60,8 @@ Building from source does take a long time._
 
 | Crystal   | Crystalline |
 | --------- | ----------- |
-| **1.20**  | **0.18**    |
+| **1.21**  | **0.18**    |
+| 1.20      | 0.18        |
 | 1.16      | 0.17        |
 | 1.15      | 0.16        |
 | 1.14      | 0.15        |
@@ -135,8 +136,13 @@ Then:
 
 ```sh
 # Produces a binary at ./bin/crystalline
-shards build crystalline --release --no-debug --progress -Dpreview_mt
+shards build crystalline --release --no-debug --progress
 ```
+
+On Crystal 1.21+ the execution-contexts runtime is used by default and
+compilations run on a dedicated context, keeping the server responsive while
+building. On older versions, add `-Dpreview_mt` to build the legacy
+multithreaded runtime instead.
 
 #### Global install
 
@@ -145,7 +151,7 @@ git clone https://github.com/elbywan/crystalline
 cd crystalline
 shards install
 mkdir bin
-crystal build ./src/crystalline.cr  -o ./bin/crystalline --release --no-debug --progress -Dpreview_mt
+crystal build ./src/crystalline.cr  -o ./bin/crystalline --release --no-debug --progress
 ```
 
 #### Known Build Issues
@@ -181,7 +187,7 @@ declaration would solve the issue:
 # Prepend the command with this:
 env LLVM_CONFIG=/usr/local/opt/llvm/bin/llvm-config
 # For Example:
-env LLVM_CONFIG=/usr/local/opt/llvm/bin/llvm-config crystal build ./src/crystalline.cr  -o ./bin/crystalline --release --no-debug -Dpreview_mt
+env LLVM_CONFIG=/usr/local/opt/llvm/bin/llvm-config crystal build ./src/crystalline.cr  -o ./bin/crystalline --release --no-debug
 ```
 
 > Replace `env` by `export` on Debian and derived (Ubuntu, Mint, ...)
@@ -342,14 +348,18 @@ Each of these projects must contain the `shard.yml`, ideally with the entry poin
 
 ### Compilation flags
 
-To use specific compilation flags, you can add a `crystalline/flags` key in the `shard.yml` file:
+To use specific compilation flags, you can add a `crystalline/flags` key in the
+`shard.yml` file. They are passed to the compiler when type-checking the
+project:
 
 ```yml
 crystalline:
   flags:
-    - preview_mt
     - execution_context
 ```
+
+On Crystal 1.21+ the execution-contexts runtime is the default; `preview_mt`
+selects the legacy multithreaded runtime on older versions.
 
 ## Features
 
@@ -384,6 +394,13 @@ definition signature or the expanded macro.
 Fetch all the symbols in a given file, used in VSCode to populate the Outline
 view and the Breadcrumbs.
 
+#### Lightweight analysis
+
+Hover, completion and go-to definitions resolve from an incremental source
+index without waiting for the compiler — including on unsaved buffers —
+completion triggers while typing plain identifiers, and results are ranked
+closest-type-first. A background compile refines the results once it finishes.
+
 ## Limitations
 
 - Memory usage is high due to the boehm GC behaviour and the crystal compiler
@@ -391,10 +408,10 @@ view and the Breadcrumbs.
 
 - Due to Crystal having a wide type inference system (which is incredibly
   convenient and practical), compilation times can unfortunately be relatively
-  long for big projects and depending on the hardware. This means that the LSP
-  will be stuck waiting for the compiler to finish before being able to provide
-  a response. Crystalline tries to mitigate that by caching compilation outcome
-  when possible.
+  long for big projects and depending on the hardware. Crystalline mitigates
+  this by answering hover, completion and go-to requests immediately from a
+  lightweight source index while the full compile runs in the background, and
+  by caching compilation outcome when possible.
 
 - Methods that are not called anywhere will not be analyzed, as this is how the
   Crystal compiler works.
