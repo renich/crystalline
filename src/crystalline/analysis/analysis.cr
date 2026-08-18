@@ -3,35 +3,59 @@ require "./cursor_visitor"
 require "./submodule_visitor"
 
 module Crystalline::Analysis
-  {% if flag?(:preview_mt) %}
+  {% if Fiber.has_constant?(:ExecutionContext) %}
+    # New execution-contexts runtime (Crystal >= 1.21): run compilation fibers on a
+    # dedicated single-worker parallel context, so compiles never block the LSP
+    # event loop (the main context is single-threaded by default).
+    @@compile_context : Fiber::ExecutionContext::Parallel = Fiber::ExecutionContext::Parallel.new("crystalline-compile", 1)
+
+    private def self.spawn_dedicated(*, name : String? = nil, &block)
+      @@compile_context.spawn(name: name, &block)
+    end
+  {% elsif flag?(:preview_mt) %}
+    # Legacy multithreading runtime: pin compilation fibers to a dedicated thread.
     @@dedicated_thread : Thread = Thread.new(name: "crystalline-dedicated-thread") do
       scheduler = Thread.current.scheduler
       scheduler.run_loop
     end
-  {% end %}
 
-  private def self.spawn_dedicated(*, name : String? = nil, &block : -> _)
-    captured_block = block
-    {% if flag?(:preview_mt) %}
-      fiber = Fiber.new(name, &captured_block)
+    private def self.spawn_dedicated(*, name : String? = nil, &block)
+      fiber = Fiber.new(name, &block)
       fiber.set_current_thread(@@dedicated_thread)
       fiber.enqueue
       fiber
-    {% else %}
-      captured_block.call
-      Fiber.current
-    {% end %}
+    end
+  {% else %}
+    # Single-threaded runtime: spawn on the current context.
+    private def self.spawn_dedicated(*, name : String? = nil, &block)
+      Fiber.new(name, &block).enqueue
+    end
+  {% end %}
+
+  # Runs *block* on the dedicated compile context and waits for its result.
+  # Keeps CPU-heavy work (compiles, index/summary builds) off the LSP event
+  # loop whenever the runtime provides a parallel context.
+  def self.run_dedicated(&block : -> T) : T forall T
+    reply_channel = Channel(T | Exception).new
+    spawn_dedicated do
+      reply_channel.send(block.call)
+    rescue e : Exception
+      reply_channel.send(e)
+    end
+    result = reply_channel.receive
+    raise result if result.is_a?(Exception)
+    result
   end
 
   # Compile a target *file_uri*.
-  def self.compile(server : LSP::Server, file_uri : URI, *, lib_path : String? = nil, file_overrides : Hash(String, String)? = nil, ignore_diagnostics = false, wants_doc = false, fail_fast = false, top_level = false, compiler_flags : Array(String) = [] of String)
+  def self.compile(server : LSP::Server, file_uri : URI, *, lib_path : String? = nil, file_overrides : Hash(String, String)? = nil, ignore_diagnostics = false, wants_doc = false, fail_fast = false, top_level = false, compiler_flags : Array(String) = [] of String) : Crystal::Compiler::Result?
     if file_uri.scheme == "file"
       file = File.new file_uri.decoded_path
       sources = [
         Crystal::Compiler::Source.new(file_uri.decoded_path, file.gets_to_end),
       ]
       file.close
-      self.compile(server, sources, lib_path: lib_path, file_overrides: file_overrides, ignore_diagnostics: ignore_diagnostics, wants_doc: wants_doc, top_level: top_level, compiler_flags: compiler_flags)
+      self.compile(server, sources, lib_path: lib_path, file_overrides: file_overrides, ignore_diagnostics: ignore_diagnostics, wants_doc: wants_doc, fail_fast: fail_fast, top_level: top_level, compiler_flags: compiler_flags)
     end
   end
 
@@ -91,7 +115,13 @@ module Crystalline::Analysis
       end
 
       result.program.error_stack.try &.each do |e|
-        diagnostics.append_from_exception(e) if e.is_a?(Crystal::TypeException) || e.is_a?(Crystal::SyntaxException)
+        next unless e.is_a?(Crystal::TypeException) || e.is_a?(Crystal::SyntaxException)
+        # The error-tolerant semantic can emit bogus errors inside the stdlib's
+        # llvm wrapper (e.g. Bool-to-Int32 conversions that a regular compile
+        # never reports, see di_builder.cr). Real user-facing errors surface at
+        # the user's call site instead, so these are safe to skip.
+        next if stdlib_llvm_error?(e)
+        diagnostics.append_from_exception(e)
       end
     end
 
@@ -107,6 +137,17 @@ module Crystalline::Analysis
   ensure
     # Propagate diagnostics to the client.
     diagnostics.try &.publish(server) unless ignore_diagnostics
+  end
+
+  # True when the error is located inside the stdlib's llvm wrapper, where the
+  # error-tolerant semantic can report errors a regular compile never does.
+  private def self.stdlib_llvm_error?(e : Crystal::CodeError) : Bool
+    return false unless e.is_a?(Crystal::TypeException)
+
+    filename = e.filename
+    return false unless filename
+
+    filename.to_s.includes?("/src/llvm/") || filename.to_s.includes?("\\src\\llvm\\")
   end
 
   # Return the node at the given *location*.

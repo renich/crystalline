@@ -1,4 +1,4 @@
-FROM docker.io/crystallang/crystal:1.20.2-alpine
+FROM docker.io/crystallang/crystal:1.21.0-alpine
 
 WORKDIR /app
 
@@ -9,9 +9,10 @@ RUN apk add --update --no-cache --force-overwrite \
 # Build crystalline.
 COPY . /app/
 
-RUN git clone -b 1.20.2 --depth=1 https://github.com/crystal-lang/crystal \
+RUN git clone -b 1.21.0 --depth=1 https://github.com/crystal-lang/crystal \
       && make -C crystal llvm_ext \
       && CRYSTAL_PATH=crystal/src:lib shards build crystalline \
       --no-debug --progress --stats --production --static --release \
-      -Dpreview_mt --ignore-crystal-version \
+      --ignore-crystal-version \
       && rm -rf crystal
+

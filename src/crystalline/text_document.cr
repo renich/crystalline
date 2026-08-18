@@ -6,11 +6,19 @@ class Crystalline::TextDocument
   getter uri : URI
   @inner_contents : Array(String) = [] of String
   getter! version : Int32
+
+  # The client-assigned version, or 0 when the client never sent one.
+  def version_number : Int32
+    @version || 0
+  end
+
   @pending_changes : Priority::Queue({String, LSP::Range}) = Priority::Queue({String, LSP::Range}).new
   getter? project : Project?
+  getter? dirty = false
 
   def initialize(@uri, @project, contents : String)
     self.contents = contents
+    @dirty = false
   end
 
   def contents=(contents : String)
@@ -48,6 +56,12 @@ class Crystalline::TextDocument
       item = @pending_changes.shift
       partial_update(item.value[0], item.value[1], version: item.priority.to_i32)
     end
+
+    @dirty = true
+  end
+
+  def mark_saved
+    @dirty = false
   end
 
   private def update_contents(contents : String, range : LSP::Range? = nil, version : Int32? = nil)

@@ -1,18 +1,28 @@
 require "log"
 require "lsp/server"
+require "./version"
+# Load the compiler modules before the ext extensions: ext/compiler.cr
+# reopens Crystal compiler classes (Program, Compiler, ...) whose base
+# types live in those modules, and a consumer requiring main.cr without
+# requires.cr first (e.g. a spec) would otherwise compile the extensions
+# against an empty compiler namespace.
+require "./requires"
 require "./ext/*"
+require "./lightweight/*"
 require "./*"
 
 module Crystalline
-  VERSION = {{ (`shards version #{__DIR__}`.strip + "+" +
-                system("git rev-parse --short HEAD || echo unknown").stringify).stringify.strip }}
   # Supported server capabilities.
   SERVER_CAPABILITIES = LSP::ServerCapabilities.new(
     text_document_sync: LSP::TextDocumentSyncKind::Incremental,
     document_formatting_provider: true,
     document_range_formatting_provider: true,
     completion_provider: LSP::CompletionOptions.new(
-      trigger_characters: [".", ":", "@"],
+      # Identifier characters included so clients fire completion while the
+      # user is typing a plain word (not just after `.`, `::` or `@`). The
+      # lightweight path answers in tens of milliseconds, so per-keystroke
+      # requests are cheap.
+      trigger_characters: [".", ":", "@"] + ('a'..'z').to_a.map(&.to_s) + ('A'..'Z').to_a.map(&.to_s) + ["_"],
     ),
     hover_provider: true,
     definition_provider: true,
@@ -31,10 +41,46 @@ module Crystalline
     end
 
     private def self.initialize_from_crystal_env
-      crystal_env
+      parse_crystal_env_output(crystal_env)
+    end
+
+    # Parses `crystal env` output (bare `KEY=value` lines, values shell-
+    # quoted) into an env map. Split on the first `=` only: a value may
+    # contain `=` itself (`CRYSTAL_OPTS='-Dfoo=1'`), and a full split would
+    # truncate it and leak the opening quote into the imported env — which
+    # the next `crystal env` run re-escapes, growing the variable
+    # exponentially until subprocess spawning fails with E2BIG.
+    def self.parse_crystal_env_output(output : String) : Hash(String, String)
+      output
         .lines
-        .map(&.split('='))
+        .map(&.split('=', 2))
         .to_h
+        .transform_values { |value| unquote_env_value(value) }
+    end
+
+    # `crystal env` shell-quotes values (e.g. `CRYSTAL_OPTS=''`). Import them
+    # verbatim would re-import the quotes, which the next `crystal env` run
+    # escapes again — growing the value exponentially until subprocess
+    # spawning fails with E2BIG. Decode the shell quoting instead: values are
+    # wrapped in single quotes, and a single quote inside the value is escaped
+    # as `'"'"'` (close quote, double-quoted quote, reopen quote).
+    def self.unquote_env_value(value : String) : String
+      return value unless value.starts_with?('\'') && value.ends_with?('\'') && value.size >= 2
+
+      String.build do |result|
+        index = 1
+        while index < value.size - 1
+          char = value[index]
+          if char == '\'' && value[index + 1]? == '"' && value[index + 2]? == '\'' && value[index + 3]? == '"' && value[index + 4]? == '\''
+            # A single quote inside single quotes is escaped as `'"'"'`.
+            result << '\''
+            index += 5
+          else
+            result << char
+            index += 1
+          end
+        end
+      end
     end
 
     private def self.crystal_env

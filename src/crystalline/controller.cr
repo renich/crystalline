@@ -7,7 +7,6 @@ class Crystalline::Controller
   @pending_requests : Set(LSP::RequestMessage::RequestId) = Set(LSP::RequestMessage::RequestId).new
   # Used to process certain requests synchronously.
   @documents_lock = Mutex.new
-  @compiler_lock = Mutex.new
 
   def initialize(@server : LSP::Server)
     @server.start(self)
@@ -18,11 +17,24 @@ class Crystalline::Controller
   end
 
   def when_ready : Nil
-    # Compile the workspace at once.
-    spawn same_thread: true do
+    spawn do
+      # Ensure the disk-cached stdlib index is available for single-file
+      # queries issued before the project index exists: instant on cache
+      # hits, generated in the background on the first run.
+      Crystalline::Lightweight::PreludeIndex.ensure_loaded
+
+      # Then run the top-level semantic pass per project: it populates the
+      # lightweight project index (including the stdlib) within seconds, so
+      # interactive features work before the full compile finishes.
+      workspace.projects.each do |p|
+        workspace.recalculate_dependencies(@server, p)
+      end
+
+      # Then compile each project entry point at once.
       workspace.projects.each do |p|
         if entry_point = p.entry_point?
-          workspace.compile(@server, entry_point)
+          LSP::Log.info { "[compile] startup: #{entry_point.decoded_path}" }
+          workspace.compile(@server, entry_point, wants_doc: true)
         end
       end
     end
@@ -60,23 +72,17 @@ class Crystalline::Controller
         }
       }
     when LSP::HoverRequest
-      @compiler_lock.synchronize do
-        return nil unless @pending_requests.includes? message.id
-        file_uri = URI.parse message.params.text_document.uri
-        workspace.hover(@server, file_uri, message.params.position)
-      end
+      return nil unless @pending_requests.includes? message.id
+      file_uri = URI.parse message.params.text_document.uri
+      workspace.hover(@server, file_uri, message.params.position)
     when LSP::DefinitionRequest
-      @compiler_lock.synchronize do
-        return nil unless @pending_requests.includes? message.id
-        file_uri = URI.parse message.params.text_document.uri
-        workspace.definitions(@server, file_uri, message.params.position)
-      end
+      return nil unless @pending_requests.includes? message.id
+      file_uri = URI.parse message.params.text_document.uri
+      workspace.definitions(@server, file_uri, message.params.position)
     when LSP::CompletionRequest
-      @compiler_lock.synchronize do
-        return nil unless @pending_requests.includes? message.id
-        file_uri = URI.parse message.params.text_document.uri
-        workspace.completion(@server, file_uri, message.params.position, message.params.context.try &.trigger_character)
-      end
+      return nil unless @pending_requests.includes? message.id
+      file_uri = URI.parse message.params.text_document.uri
+      workspace.completion(@server, file_uri, message.params.position, message.params.context.try &.trigger_character)
     when LSP::DocumentSymbolsRequest
       @documents_lock.synchronize do
         file_uri = URI.parse message.params.text_document.uri
@@ -123,13 +129,14 @@ class Crystalline::Controller
       }
       file_uri = message.params.text_document.uri
       spawn do
-        @compiler_lock.synchronize {
-          workspace.compile(
-            @server,
-            URI.parse(file_uri),
-            discard_nil_cached_result: true,
-          )
-        }
+        parsed_uri = URI.parse(file_uri)
+        LSP::Log.info { "[compile] save: #{parsed_uri.decoded_path}" }
+        workspace.compile(
+          @server,
+          parsed_uri,
+          discard_nil_cached_result: true,
+          wants_doc: true,
+        )
       end
     when LSP::CancelNotification
       @pending_requests.delete message.params.id

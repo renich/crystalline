@@ -1,10 +1,32 @@
 require "yaml"
+require "uri"
+require "./ext/uri"
+require "./lightweight/index"
+require "./lightweight/summary"
 
 class Crystalline::Project
   # The project root filesystem uri.
   getter root_uri : URI
+  # Lightweight top-level semantic index for interactive features.
+  property lightweight_index : Crystalline::Lightweight::Index?
+  # Compiler-backed semantic summary built from the last successful full compile.
+  property semantic_summary : Crystalline::Lightweight::Summary?
   # The dependencies of the project, meaning the list of files required by the compilation target (entry point).
   property dependencies : Set(String) = Set(String).new
+  # Parse-only index of the project's own source files (src/ + lib/), built
+  # lazily before the first compile so receivers of project types resolve
+  # during the cold-start window. Invalidated when a project file is saved
+  # or closed.
+  @source_index : Crystalline::Lightweight::Index?
+
+  def source_index : Crystalline::Lightweight::Index?
+    @source_index ||= build_source_index
+  end
+
+  def source_index=(index : Crystalline::Lightweight::Index?)
+    @source_index = index
+  end
+
   # Determines the project entry point.
   getter? entry_point : URI? do
     shard_name = shard_yaml["name"].as_s
@@ -21,7 +43,7 @@ class Crystalline::Project
   rescue e
     nil
   end
-  # Flags to pass to the underlying compiler (-Dpreview_mt, etc).
+  # Flags to pass to the underlying compiler (e.g. -Dexecution_context).
   getter flags : Array(String) do
     (shard_yaml.dig?("crystalline", "flags").try(&.as_a.map(&.as_s)) || [] of String).tap do |flags|
       LSP::Log.info { "Flags for project #{root_uri}: #{flags}" }
@@ -73,13 +95,16 @@ class Crystalline::Project
   end
 
   # Finds the path-wise distance to the given file URI. If the file URI is not a
-  # dependency of this workspace's entry point, returns nil.
-  def distance_to_dependency(file_uri : URI) : Int32?
+  # dependency of this workspace's entry point, returns nil unless
+  # *require_dependency* is false (a pure path-based fit used by lightweight
+  # queries, which never drives compile targeting or cache invalidation).
+  def distance_to_dependency(file_uri : URI, *, require_dependency = true) : Int32?
     relative = Path[file_uri.decoded_path].relative_to?(root_uri.decoded_path)
+    return nil if relative.nil?
 
-    # If we can't get a relative path, give it the maximum distance possible, so
-    # it's the lowest priority.
-    return Int32::MAX if relative.nil?
+    if require_dependency && dependencies.present? && !dependencies.includes?(file_uri.decoded_path)
+      return nil
+    end
 
     relative.parts.size
   end
@@ -89,10 +114,39 @@ class Crystalline::Project
     Path[@root_uri.decoded_path, "lib"].to_s
   end
 
-  # Finds the best-fitting project to use for the given file.
-  def self.best_fit_for_file(projects : Array(Project), file_uri : URI) : Project?
+  # Parses every project source file (src/ + lib/) into a single index.
+  # No semantic pass: type names, method signatures and docs only, which is
+  # enough to complete receivers like `workspace` before the first compile.
+  private def build_source_index : Crystalline::Lightweight::Index?
+    files = [] of String
+    root = @root_uri.decoded_path
+
+    src_dir = Path[root, "src"]
+    files.concat(Dir.glob(Path[src_dir, "**", "*.cr"]).sort) if Dir.exists?(src_dir)
+
+    lib_dir = Path[root, "lib"]
+    files.concat(Dir.glob(Path[lib_dir, "*", "src", "**", "*.cr"]).sort) if Dir.exists?(lib_dir)
+
+    indexes = [] of Crystalline::Lightweight::Index
+    files.each do |file|
+      next unless File.file?(file)
+      if index = Crystalline::Lightweight::Index.from_source(File.read(file), file)
+        indexes << index
+      end
+    end
+
+    return if indexes.empty?
+
+    LSP::Log.info { "[project] source index: #{indexes.size} files for #{root}" }
+    Crystalline::Lightweight::Index.merge(indexes)
+  end
+
+  # Finds the best-fitting project to use for the given file. By default only
+  # files that are dependencies of a project's entry point match; pass
+  # *require_dependency* = false for a pure path-based fit.
+  def self.best_fit_for_file(projects : Array(Project), file_uri : URI, *, require_dependency = true) : Project?
     project_distances = projects.compact_map do |p|
-      distance = p.distance_to_dependency(file_uri)
+      distance = p.distance_to_dependency(file_uri, require_dependency: require_dependency)
       {p, distance} if distance
     end
 

@@ -1,4 +1,5 @@
 require "compiler/crystal/syntax"
+require "./position_utils"
 
 class Crystalline::CompletionContext
   record TokenSpan,
@@ -24,15 +25,40 @@ class Crystalline::CompletionContext
   end
 
   def detect : self?
+    # The LSP cursor column is UTF-16-based; everything computed from it
+    # (fragments, token spans, analysis column) is character-based.
+    @cursor = PositionUtils.utf16_to_char_index(@line, @cursor)
+
     fragment_start, fragment_end = identifier_fragment_bounds
     @replace_start = fragment_start
     @replace_end = fragment_end
 
-    tokens = tokens_for_line
-    return if inside_comment?(tokens) || inside_delimited_literal?(tokens)
+    tokens = begin
+      tokens_for_line
+    rescue Crystal::SyntaxException
+      # Mid-edit lines can contain lexer garbage (a lone `@`, an unterminated
+      # string...): fall back to an empty token list so completion detection
+      # can still run on the fragment.
+      [] of TokenSpan
+    end
+    # The lexer lexes a `#{` inside a string as the start of a comment, and
+    # the cursor is "inside a string" per the delimiter scan — but an
+    # interpolation is code: completion should still work there
+    # (`"#{position.`).
+    in_interpolation = (interp = @line.rindex("\#{", @cursor)) && !@line[interp + 2, @cursor - interp - 2].includes?('}')
+    return if !in_interpolation && (inside_comment?(tokens) || inside_delimited_literal?(tokens))
 
-    if @trigger_character.nil?
-      @trigger_character = inferred_trigger(tokens, fragment_start)
+    trigger = @trigger_character
+    if trigger.nil? || trigger.matches?(/\A[A-Za-z]\z/) || trigger == "_"
+      # Clients register the identifier characters as completion triggers
+      # (per-keystroke completions), so typing `foo.a` arrives with
+      # trigger "a" — but the receiver is still `foo`, and the analysis
+      # must end at the trigger dot (or `::`/sigil) or the method list is
+      # replaced by plain context items. Infer the structural trigger from
+      # the line when the reported one is an identifier character.
+      if inferred = inferred_trigger(tokens, fragment_start)
+        @trigger_character = inferred
+      end
     end
 
     case @trigger_character
@@ -40,6 +66,15 @@ class Crystalline::CompletionContext
       if operator = preceding_period(tokens, fragment_start)
         @analysis_column = operator.start_char
         @replace_start = operator.end_char
+      elsif fragment_start > 0 && @line[fragment_start - 1] == '.'
+        # The tokenizer could not identify the period (mid-edit lexer
+        # failures on regex/string-heavy lines): the character before
+        # the fragment is still the trigger, so the analysis prefix
+        # must end there — otherwise the fragment is dragged into the
+        # receiver chain (`foo.scan(/x/).placeholde`) and resolution
+        # fails on it.
+        @analysis_column = fragment_start - 1
+        @replace_start = fragment_start
       end
     when ":"
       if operator = preceding_colon_colon(tokens, fragment_start)
@@ -47,15 +82,23 @@ class Crystalline::CompletionContext
         @replace_start = operator.end_char
       end
     when "@"
+      # The replace range covers the sigil (`@documents_`), so the edit
+      # text carries the full name and VSCode's filter word matches the
+      # filterText as a clean prefix. The range ends at the cursor: the
+      # fixer may have appended a placeholder name to the sigil, which the
+      # user has not typed.
       if sigil = current_sigiled_token(tokens)
         @analysis_column = sigil.start_char
-        @replace_start = sigil.start_char + sigil_prefix_size(sigil.type)
+        @replace_start = sigil.start_char
+        @replace_end = @cursor
       elsif @cursor > 1 && @line[@cursor - 2, 2]? == "@@"
         @analysis_column = @cursor - 2
-        @replace_start = @cursor
+        @replace_start = @cursor - 2
+        @replace_end = @cursor
       elsif @cursor > 0 && @line[@cursor - 1] == '@'
         @analysis_column = @cursor - 1
-        @replace_start = @cursor
+        @replace_start = @cursor - 1
+        @replace_end = @cursor
       end
     else
       @analysis_column = @cursor
@@ -72,26 +115,9 @@ class Crystalline::CompletionContext
 
   def completion_range(line_number : Int32) : LSP::Range
     LSP::Range.new(
-      start: LSP::Position.new(line: line_number, character: @replace_start),
-      end: LSP::Position.new(line: line_number, character: @replace_end),
+      start: LSP::Position.new(line: line_number, character: PositionUtils.char_to_utf16_index(@line, @replace_start)),
+      end: LSP::Position.new(line: line_number, character: PositionUtils.char_to_utf16_index(@line, @replace_end)),
     )
-  end
-
-  def rewritten_line : String
-    suffix = @line[@replace_end..]?
-    right_offset = 0
-    truncate_line = false
-
-    suffix.try &.each_char_with_index do |char, index|
-      unless ident_char?(char) || char == ':'
-        truncate_line = true if char == '(' || char == '{' || char == '['
-        right_offset = index
-        break
-      end
-    end
-
-    suffix = suffix.try &.[right_offset...]?
-    analysis_prefix + (!truncate_line ? (suffix || "\n") : "\n")
   end
 
   private def identifier_fragment_bounds
@@ -188,6 +214,14 @@ class Crystalline::CompletionContext
 
     return "." if preceding_period(tokens, fragment_start)
     return ":" if preceding_colon_colon(tokens, fragment_start)
+
+    # Fallback for mid-edit lines the lexer cannot tokenize as code (a `#{`
+    # inside a string lexes as a comment): the character before the fragment
+    # still tells us the trigger.
+    if fragment_start > 0
+      return "." if @line[fragment_start - 1] == '.'
+      return ":" if fragment_start >= 2 && @line[fragment_start - 2, 2] == "::"
+    end
   end
 
   private def current_sigiled_token(tokens : Array(TokenSpan))
@@ -196,10 +230,6 @@ class Crystalline::CompletionContext
         @cursor >= token.start_char &&
         @cursor <= token.end_char
     end
-  end
-
-  private def sigil_prefix_size(type : Crystal::Token::Kind)
-    type.class_var? ? 2 : 1
   end
 
   private def preceding_period(tokens : Array(TokenSpan), fragment_start : Int32)
