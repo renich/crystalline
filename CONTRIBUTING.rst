@@ -24,7 +24,8 @@ On some systems, the compiler may need help finding the ``llvm-config`` binary. 
 
 .. code-block:: bash
 
-   export LLVM_CONFIG="$(brew --prefix llvm)/bin/llvm-config" # MacOS (Homebrew)
+   # MacOS (Homebrew, handles versioned and unversioned LLVM formulae):
+   export LLVM_CONFIG="$(brew --prefix $(brew deps --installed crystal 2>/dev/null | grep -E '^llvm(@[0-9]+)?$' || echo llvm))/bin/llvm-config"
    # Or on Fedora/RHEL:
    export LLVM_CONFIG="/usr/bin/llvm-config"
 

@@ -29,7 +29,16 @@ jobs:
         run: brew update && brew install crystal || true
       - name: Build the binary
         run: |
-          export LLVM_CONFIG="$(brew --prefix llvm)/bin/llvm-config"
+          LLVM_DEP="$(brew deps --installed crystal 2>/dev/null | grep -E '^llvm(@[0-9]+)?$' | head -n 1)"
+          if [ -n "$LLVM_DEP" ] && [ -x "$(brew --prefix "$LLVM_DEP")/bin/llvm-config" ]; then
+            export LLVM_CONFIG="$(brew --prefix "$LLVM_DEP")/bin/llvm-config"
+          elif [ -x "$(brew --prefix llvm 2>/dev/null)/bin/llvm-config" ]; then
+            export LLVM_CONFIG="$(brew --prefix llvm)/bin/llvm-config"
+          else
+            export LLVM_CONFIG="$(ls -d $(brew --prefix)/opt/llvm*/bin/llvm-config 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          echo "Using LLVM_CONFIG: $LLVM_CONFIG"
+          export PATH="$(dirname "$LLVM_CONFIG"):$PATH"
           shards build crystalline --release --no-debug --stats --progress --ignore-crystal-version
       - name: Upload a Build Artifact
         uses: actions/upload-artifact@v7.0.1
